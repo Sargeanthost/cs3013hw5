@@ -45,30 +45,30 @@ typedef struct {
 } thread_args_t;
 
 barrier_t read_barrier;
+barrier_t write_barrier;
 
 void *hillis_steele_scan(void *args) {
-    thread_args_t *threadArgs = (thread_args_t *) args;
-    int *array = threadArgs->array;
-    int size = threadArgs->array_size;
-    int index = threadArgs->index;
-    int chunk = threadArgs->chunk;
+    thread_args_t *thread_args = (thread_args_t *) args;
+    int *array = thread_args->array;
+    int size = thread_args->array_size;
+    int index = thread_args->index;
+    int chunk = thread_args->chunk;
 
-    int d = 1;
+    int offset = 1;
+    int old_values[size];
 
-    while (d < size) {
-        int offset = 1 << (d - 1);
-        int old_values[size];
+    while (offset < size) {
         // Ensure in sync read so we dont read updated values
         memcpy(&old_values, array, sizeof(int) * size);
         barrier_wait(&read_barrier);
 
-        //TODO bounds check these things
-        for (int i = index; i < threadArgs->index + chunk; i++) {
-            if (index + offset < size) {
+        for (int i = index; i < thread_args->index + chunk; i++) {
+            if (i + offset < size) {
                 array[i + offset] += old_values[i];
             }
         }
-        d *= 2;
+        barrier_wait(&write_barrier);
+        offset *= 2;
     }
     return NULL;
 }
@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
     thread_args_t *thread_args = malloc(num_threads * sizeof(thread_args_t));
 
     barrier_init(&read_barrier, num_threads);
+    barrier_init(&write_barrier, num_threads);
 
     //assumes you wont give it more threads than the size of the array
     int chunk = vector_size / num_threads;
