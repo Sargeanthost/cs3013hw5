@@ -25,8 +25,8 @@ void barrier_wait(barrier_t *barrier) {
     pthread_mutex_lock(&barrier->mutex);
     barrier->count++;
 
-    // If this is the last thread to arrive at the barrier, release all threads. Mistake in checkpoint was not resetting,
-    // so the while loop always had a thread > max, so it would dispatch the thread that just got to the barrier
+    // Mistake in checkpoint was not resetting the count, so the while loop always had a thread > max,
+    // so it would dispatch the thread that just got to the barrier
     if (barrier->count == barrier->max) {
         barrier->count = 0;
         pthread_cond_broadcast(&barrier->cond);
@@ -49,23 +49,22 @@ barrier_t read_barrier;
 
 void *hillis_steele_scan(void *args) {
     thread_args_t *thread_args = (thread_args_t *) args;
-    int ioffset = 0;
 
+    // If we don't have old_values, we will be reading the updated values which will cause garbage
+    // malloced because stack typically won't have enough space
     int *old_values = malloc(sizeof(int) * thread_args->array_size);
 
-    //check that our indexes are still being worked on. yield if not?
+    // The rounds loop, goes up to log(size)
     for (int offset = 1; offset < thread_args->array_size; offset *= 2) {
-        // Ensure in sync read so we dont read updated values
         memcpy(old_values, thread_args->array, sizeof(int) * thread_args->array_size);
-
+        // Ensure read sync
         barrier_wait(&read_barrier);
 
-        for (int i = thread_args->index; i < thread_args->index + thread_args->chunk; i++) {
-            ioffset = i+offset;
-            if (ioffset< thread_args->array_size) {
-                thread_args->array[ioffset] += old_values[i];
-            }
+        // for each index that this thread is assigned to mutate
+        for (int i = thread_args->index; i < thread_args->index + thread_args->chunk && i + offset < thread_args->array_size; i++) {
+                thread_args->array[i + offset] += old_values[i];
         }
+        // ensure write sync
         barrier_wait(&read_barrier);
     }
     return NULL;
@@ -99,11 +98,10 @@ int main(int argc, char **argv) {
 
     read_input_vector(file_name, input_array); //assign vectors
 
-    pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
+    pthread_t threads[num_threads];
     //parallel array for use with the matching thread. keeps track of the threads accessible threads, the range of items
     //to work on, and the array
-    thread_args_t *thread_args = malloc(num_threads * sizeof(thread_args_t));
-
+    thread_args_t thread_args[num_threads];
     barrier_init(&read_barrier, num_threads);
 
     //assumes you wont give it more threads than the size of the array
@@ -121,12 +119,9 @@ int main(int argc, char **argv) {
         pthread_join(threads[i], NULL);
     }
 
-    // Print out final array
     for (int i = 0; i < vector_size; i++) {
         printf("%d\n", input_array[i]);
     }
 
     free(input_array);
-    free(threads);
-    free(thread_args);
 }
