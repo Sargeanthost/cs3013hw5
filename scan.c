@@ -4,37 +4,40 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdlib.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 #define MAX_LINE_SIZE 256
 
 typedef struct {
-    sem_t mutex;
-    sem_t barrier;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
     int count;
     int max;
 } barrier_t;
 
 void barrier_init(barrier_t *barrier, int max) {
-    sem_init(&barrier->mutex, 0, 1);
-    sem_init(&barrier->barrier, 0, 0);
+    pthread_mutex_init(&barrier->mutex, NULL);
+    pthread_cond_init(&barrier->cond, NULL);
     barrier->count = 0;
     barrier->max = max;
 }
 
 void barrier_wait(barrier_t *barrier) {
-    sem_wait(&barrier->mutex);
+    pthread_mutex_lock(&barrier->mutex);
     barrier->count++;
-    sem_post(&barrier->mutex);
 
     // If this is the last thread to arrive at the barrier, release all threads
     if (barrier->count == barrier->max) {
-        for (int i = 0; i < barrier->max; i++) {
-            sem_post(&barrier->barrier);
-        }
+        barrier->count = 0;
+        pthread_cond_broadcast(&barrier->cond);
+    } else {
+        // Wait for the last thread to arrive
+        pthread_cond_wait(&barrier->cond, &barrier->mutex);
     }
 
-    sem_wait(&barrier->barrier);
-    sem_post(&barrier->barrier);
+    pthread_mutex_unlock(&barrier->mutex);
 }
 
 typedef struct {
@@ -45,7 +48,6 @@ typedef struct {
 } thread_args_t;
 
 barrier_t read_barrier;
-barrier_t write_barrier;
 
 void *hillis_steele_scan(void *args) {
     thread_args_t *thread_args = (thread_args_t *) args;
@@ -54,21 +56,27 @@ void *hillis_steele_scan(void *args) {
     int index = thread_args->index;
     int chunk = thread_args->chunk;
 
-    int offset = 1;
-    int old_values[size];
-
-    while (offset < size) {
-        // Ensure in sync read so we dont read updated values
-        memcpy(&old_values, array, sizeof(int) * size);
+    //rounds
+    int temp_writes[size];
+    for (int displace = 1; displace < size; displace *= 2) {
+        printf("ROUND %d\n", displace);
+        memcpy(&temp_writes, array, sizeof(int) * size);
+        for (int i = index; i < thread_args->index + chunk; i++) {
+            if (i + displace < size) {
+                printf("Index %d of temp_writes is being written to by thread %ld with value %d\n", (i + displace),
+                       syscall(__NR_gettid), (array[i + displace] + array[i]));
+                temp_writes[i + displace] = array[i + displace] + array[i];
+            }
+        }
         barrier_wait(&read_barrier);
 
         for (int i = index; i < thread_args->index + chunk; i++) {
-            if (i + offset < size) {
-                array[i + offset] += old_values[i];
-            }
+            printf("Index %d of array is being written to by thread %ld with value %d\n", i,
+                   syscall(__NR_gettid), temp_writes[i]);
+            array[i] = temp_writes[i];
         }
-        barrier_wait(&write_barrier);
-        offset *= 2;
+        barrier_wait(&read_barrier);
+
     }
     return NULL;
 }
@@ -114,7 +122,6 @@ int main(int argc, char **argv) {
     thread_args_t *thread_args = malloc(num_threads * sizeof(thread_args_t));
 
     barrier_init(&read_barrier, num_threads);
-    barrier_init(&write_barrier, num_threads);
 
     //assumes you wont give it more threads than the size of the array
     int chunk = vector_size / num_threads;
@@ -126,7 +133,7 @@ int main(int argc, char **argv) {
         thread_args[i].chunk = chunk;
         pthread_create(&threads[i], NULL, hillis_steele_scan, &thread_args[i]);
     }
-    //wait on threads so we dont die before finishing TODO do we even need this?
+
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
