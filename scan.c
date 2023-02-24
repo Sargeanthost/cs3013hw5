@@ -2,11 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include <unistd.h>
-#include <sys/syscall.h>
 
 #define MAX_LINE_SIZE 256
 
@@ -29,7 +26,7 @@ void barrier_wait(barrier_t *barrier) {
     barrier->count++;
 
     // If this is the last thread to arrive at the barrier, release all threads. Mistake in checkpoint was not resetting,
-    // so while loop always had a thread > max, so it would dispatch the thread that just go to the barrier
+    // so the while loop always had a thread > max, so it would dispatch the thread that just got to the barrier
     if (barrier->count == barrier->max) {
         barrier->count = 0;
         pthread_cond_broadcast(&barrier->cond);
@@ -52,26 +49,24 @@ barrier_t read_barrier;
 
 void *hillis_steele_scan(void *args) {
     thread_args_t *thread_args = (thread_args_t *) args;
-    int *array = thread_args->array;
-    int size = thread_args->array_size;
-    int index = thread_args->index;
-    int chunk = thread_args->chunk;
+    int ioffset = 0;
 
-    int offset = 1;
-    int old_values[size];
+    int *old_values = malloc(sizeof(int) * thread_args->array_size);
 
-    while (offset < size) {
+    //check that our indexes are still being worked on. yield if not?
+    for (int offset = 1; offset < thread_args->array_size; offset *= 2) {
         // Ensure in sync read so we dont read updated values
-        memcpy(&old_values, array, sizeof(int) * size);
+        memcpy(old_values, thread_args->array, sizeof(int) * thread_args->array_size);
+
         barrier_wait(&read_barrier);
 
-        for (int i = index; i < thread_args->index + chunk; i++) {
-            if (i + offset < size) {
-                array[i + offset] += old_values[i];
+        for (int i = thread_args->index; i < thread_args->index + thread_args->chunk; i++) {
+            ioffset = i+offset;
+            if (ioffset< thread_args->array_size) {
+                thread_args->array[ioffset] += old_values[i];
             }
         }
         barrier_wait(&read_barrier);
-        offset *= 2;
     }
     return NULL;
 }
@@ -80,8 +75,6 @@ void read_input_vector(const char *filename, int *array) {
     FILE *fp;
     char *line = malloc(MAX_LINE_SIZE + 1);
     size_t len = MAX_LINE_SIZE;
-
-    //ctrl+d to EOF
     fp = strcmp(filename, "-") ? fopen(filename, "r") : stdin;
 
     assert(fp != NULL && line != NULL);
@@ -98,15 +91,9 @@ void read_input_vector(const char *filename, int *array) {
 }
 
 int main(int argc, char **argv) {
-//        puts("MAIN");
-//    if (argc < 4) {
-//        puts("Not enough arguments");
-//        exit(EXIT_FAILURE);
-//    }
-
     char *file_name = argv[1];
-    int vector_size = strtol(argv[2], NULL, 10);
-    int num_threads = strtol(argv[3], NULL, 10);
+    int vector_size = atoi(argv[2]);
+    int num_threads = atoi(argv[3]);
 
     int *input_array = malloc(sizeof(int) * vector_size);
 
@@ -123,7 +110,6 @@ int main(int argc, char **argv) {
     int chunk = vector_size / num_threads;
 
     for (int i = 0; i < num_threads; i++) {
-//        puts("MAKING A THREAD");
         thread_args[i].array = input_array;
         thread_args[i].array_size = vector_size;
         thread_args[i].index = i * chunk;
@@ -135,7 +121,7 @@ int main(int argc, char **argv) {
         pthread_join(threads[i], NULL);
     }
 
-    //print out final array
+    // Print out final array
     for (int i = 0; i < vector_size; i++) {
         printf("%d\n", input_array[i]);
     }
