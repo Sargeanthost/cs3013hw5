@@ -28,7 +28,8 @@ void barrier_wait(barrier_t *barrier) {
     pthread_mutex_lock(&barrier->mutex);
     barrier->count++;
 
-    // If this is the last thread to arrive at the barrier, release all threads
+    // If this is the last thread to arrive at the barrier, release all threads. Mistake in checkpoint was not resetting,
+    // so while loop always had a thread > max, so it would dispatch the thread that just go to the barrier
     if (barrier->count == barrier->max) {
         barrier->count = 0;
         pthread_cond_broadcast(&barrier->cond);
@@ -56,27 +57,21 @@ void *hillis_steele_scan(void *args) {
     int index = thread_args->index;
     int chunk = thread_args->chunk;
 
-    //rounds
-    int temp_writes[size];
-    for (int displace = 1; displace < size; displace *= 2) {
-        printf("ROUND %d\n", displace);
-        memcpy(&temp_writes, array, sizeof(int) * size);
+    int offset = 1;
+    int old_values[size];
+
+    while (offset < size) {
+        // Ensure in sync read so we dont read updated values
+        memcpy(&old_values, array, sizeof(int) * size);
+        barrier_wait(&read_barrier);
+
         for (int i = index; i < thread_args->index + chunk; i++) {
-            if (i + displace < size) {
-                printf("Index %d of temp_writes is being written to by thread %ld with value %d\n", (i + displace),
-                       syscall(__NR_gettid), (array[i + displace] + array[i]));
-                temp_writes[i + displace] = array[i + displace] + array[i];
+            if (i + offset < size) {
+                array[i + offset] += old_values[i];
             }
         }
         barrier_wait(&read_barrier);
-
-        for (int i = index; i < thread_args->index + chunk; i++) {
-            printf("Index %d of array is being written to by thread %ld with value %d\n", i,
-                   syscall(__NR_gettid), temp_writes[i]);
-            array[i] = temp_writes[i];
-        }
-        barrier_wait(&read_barrier);
-
+        offset *= 2;
     }
     return NULL;
 }
@@ -103,10 +98,11 @@ void read_input_vector(const char *filename, int *array) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        puts("Not enough arguments");
-        exit(EXIT_FAILURE);
-    }
+//        puts("MAIN");
+//    if (argc < 4) {
+//        puts("Not enough arguments");
+//        exit(EXIT_FAILURE);
+//    }
 
     char *file_name = argv[1];
     int vector_size = strtol(argv[2], NULL, 10);
@@ -127,6 +123,7 @@ int main(int argc, char **argv) {
     int chunk = vector_size / num_threads;
 
     for (int i = 0; i < num_threads; i++) {
+//        puts("MAKING A THREAD");
         thread_args[i].array = input_array;
         thread_args[i].array_size = vector_size;
         thread_args[i].index = i * chunk;
